@@ -37,7 +37,7 @@ header .meta { color: var(--muted); font-size: 13px; }
 .btn-logout { border-color: var(--red); color: var(--red); font-size: 11px; padding: 3px 8px; }
 .summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 12px;
   margin-bottom: 24px;
 }
@@ -106,10 +106,22 @@ a:hover { text-decoration: underline; }
 
 <script>
 const EMBEDDED_TOKEN = atob('dmNwXzQzMDRWSlBUWjRsWGdEY1dBd0JQYkE4V2hPcm5zMmt6eXJ3Y2dtb3plTmVrOVBsdTZyNE1ZeWdp');
+const EMBEDDED_TEAM = 'team_r8SrFdv3MW6i734CqzHgjFAB';
 const STORAGE_KEY = 'vercel_monitor_token_override';
+const TEAM_KEY = 'vercel_monitor_team_override';
 let VERCEL_TOKEN = localStorage.getItem(STORAGE_KEY) || EMBEDDED_TOKEN;
+let TEAM_ID = localStorage.getItem(TEAM_KEY) || EMBEDDED_TEAM;
 
 const VERCEL_API = 'https://api.vercel.com';
+
+const HOBBY_LIMITS = {
+  bandwidth: 100 * 1024 ** 3,
+  functionExecution: 100,
+  edgeFunctionInvocations: 500000,
+  edgeMiddlewareInvocations: 1000000,
+  imageOptimizations: 1000,
+  builds: 6000,
+};
 
 function fmtBytes(b) {
   if (b == null) return '—';
@@ -129,44 +141,81 @@ function fmtDate(s) {
   if (diff < 86400) return Math.floor(diff/3600) + 'h';
   return Math.floor(diff/86400) + 'd';
 }
-function daysUntil(s) { return s ? Math.ceil((new Date(s) - new Date()) / 86400000) : null; }
 
 async function apiVercel(path) {
-  const sep = path.includes('?') ? '&' : '?';
-  const res = await fetch(`${VERCEL_API}${path}${sep}v=2`, { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } });
+  const url = `${VERCEL_API}${path}${path.includes('?') ? '&' : '?'}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } });
   if (!res.ok) {
-    if (res.status === 401) throw new Error('Token Vercel tidak valid. Gunakan form override di bawah.');
+    if (res.status === 401) throw new Error('Token Vercel tidak valid.');
     throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
   }
   return res.json();
 }
 
+function periodRange() {
+  const now = new Date();
+  const from = new Date(now); from.setDate(from.getDate() - 30);
+  return { from: from.toISOString(), to: now.toISOString() };
+}
+
+async function fetchUsage(type, opts = {}) {
+  const { from, to } = periodRange();
+  const params = new URLSearchParams({ type, from, to });
+  if (TEAM_ID) params.set('teamId', TEAM_ID);
+  if (opts.projectId) params.set('projectId', opts.projectId);
+  return apiVercel(`/v2/usage?${params}`);
+}
+
 async function fetchOverview() {
-  const since = new Date(); since.setDate(since.getDate() - 30);
-  const [usage, projects] = await Promise.all([
-    apiVercel(`/usage?since=${since.toISOString().split('T')[0]}`),
-    apiVercel('/v9/projects?limit=100'),
+  const [projects, requests, builds] = await Promise.all([
+    apiVercel(`/v9/projects?limit=100${TEAM_ID ? `&teamId=${TEAM_ID}` : ''}`),
+    fetchUsage('requests'),
+    fetchUsage('builds'),
   ]);
-  return { usage, projects: projects.projects || [] };
+  return { projects: projects.projects || [], requests, builds };
 }
 
 async function fetchProjectDetail(projectId) {
   const since = new Date(); since.setDate(since.getDate() - 30);
-  const [proj, deploys] = await Promise.all([
-    apiVercel(`/v9/projects/${projectId}`),
-    apiVercel(`/v6/deployments?projectId=${projectId}&limit=1`),
+  const [proj, deploys, reqData] = await Promise.all([
+    apiVercel(`/v9/projects/${projectId}${TEAM_ID ? `?teamId=${TEAM_ID}` : ''}`),
+    apiVercel(`/v6/deployments?projectId=${projectId}&limit=1${TEAM_ID ? `&teamId=${TEAM_ID}` : ''}`),
+    fetchUsage('requests', { projectId }),
   ]);
-  let projUsage = null;
-  try { projUsage = await apiVercel(`/projects/${projectId}/usage?since=${since.toISOString().split('T')[0]}`); } catch {}
-  return { proj, deploys: deploys.deployments || [], projUsage };
+  return { proj, deploys: deploys.deployments || [], reqData };
 }
 
-function renderHeader({ usage }) {
-  const remaining = daysUntil(usage.periodEnd);
+function aggregateRequests(reqData) {
+  if (!reqData?.data) return null;
+  return reqData.data.reduce((acc, day) => {
+    acc.bandwidth_outgoing_bytes += day.bandwidth_outgoing_bytes || 0;
+    acc.bandwidth_incoming_bytes += day.bandwidth_incoming_bytes || 0;
+    acc.function_invocation_successful_count += day.function_invocation_successful_count || 0;
+    acc.function_invocation_error_count += day.function_invocation_error_count || 0;
+    acc.function_execution_successful_gb_hours += day.function_execution_successful_gb_hours || 0;
+    acc.request_hit_count += day.request_hit_count || 0;
+    acc.request_miss_count += day.request_miss_count || 0;
+    acc.monitoring_metric_count += day.monitoring_metric_count || 0;
+    return acc;
+  }, { bandwidth_outgoing_bytes: 0, bandwidth_incoming_bytes: 0, function_invocation_successful_count: 0, function_invocation_error_count: 0, function_execution_successful_gb_hours: 0, request_hit_count: 0, request_miss_count: 0, monitoring_metric_count: 0 });
+}
+
+function aggregateBuilds(buildsData) {
+  if (!buildsData?.data) return null;
+  return buildsData.data.reduce((acc, day) => {
+    acc.completed += day.build_completed_count || 0;
+    acc.failed += day.build_failed_count || 0;
+    acc.seconds += day.build_build_seconds || 0;
+    acc.queued += day.build_queued_seconds || 0;
+    return acc;
+  }, { completed: 0, failed: 0, seconds: 0, queued: 0 });
+}
+
+function renderHeader() {
   return `<header>
     <div>
-      <h1>Vercel Monitor — ${usage.username || 'akun'}</h1>
-      <div class="meta">Plan: <b>${(usage.plan||'?').toUpperCase()}</b> · Reset: ${usage.periodEnd} (${remaining} hari)</div>
+      <h1>Vercel Monitor — smpabbs</h1>
+      <div class="meta">Plan: <b>HOBBY</b> · 30 hari terakhir · ${TEAM_ID ? 'Team ID aktif' : 'Personal'}</div>
     </div>
     <div>
       <button class="btn" id="refresh">↻ Refresh</button>
@@ -176,95 +225,132 @@ function renderHeader({ usage }) {
   </header>`;
 }
 
-function renderSummary({ usage }) {
-  const u = {};
-  for (const item of (usage.usage || [])) u[item.name] = item;
-  const labels = {
-    bandwidth: 'Bandwidth',
-    fastDataTransfer: 'Fast Data Transfer',
-    invocations: 'Function Invocations',
-    functionDuration: 'Function Duration',
-    edgeFunctionInvocations: 'Edge Function Invocations',
-    edgeMiddlewareInvocations: 'Edge Middleware Invocations',
-    buildMinutes: 'Build Minutes',
-    imageOptimizations: 'Image Optimizations',
-    dataCacheRead: 'Edge Data Cache Read',
-    dataCacheWrite: 'Edge Data Cache Write',
-    sourceImages: 'Source Images',
-  };
-  const cards = Object.entries(labels).map(([key, label]) => {
-    const item = u[key]; if (!item) return '';
-    const value = item.value || 0;
-    const included = item.included?.value || 0;
-    const p = pct(value, included);
+function renderSummary({ requests, builds }) {
+  const r = aggregateRequests(requests) || {};
+  const b = aggregateBuilds(builds) || {};
+  const totalReq = (r.request_hit_count || 0) + (r.request_miss_count || 0);
+
+  const cards = [
+    {
+      label: 'Bandwidth Out',
+      used: r.bandwidth_outgoing_bytes,
+      total: HOBBY_LIMITS.bandwidth,
+      fmt: fmtBytes,
+      totalFmt: fmtBytes(HOBBY_LIMITS.bandwidth),
+    },
+    {
+      label: 'Bandwidth In',
+      used: r.bandwidth_incoming_bytes,
+      total: HOBBY_LIMITS.bandwidth,
+      fmt: fmtBytes,
+      totalFmt: fmtBytes(HOBBY_LIMITS.bandwidth),
+    },
+    {
+      label: 'Function Invocations',
+      used: r.function_invocation_successful_count,
+      total: 1000000,
+      fmt: fmtNum,
+      totalFmt: '1M',
+    },
+    {
+      label: 'Function Errors',
+      used: r.function_invocation_error_count,
+      total: 1000,
+      fmt: fmtNum,
+      totalFmt: '< 1k',
+    },
+    {
+      label: 'Function Duration',
+      used: r.function_execution_successful_gb_hours,
+      total: HOBBY_LIMITS.functionExecution,
+      fmt: v => v.toFixed(2) + ' GB-hrs',
+      totalFmt: HOBBY_LIMITS.functionExecution + ' GB-hrs',
+    },
+    {
+      label: 'Total Requests',
+      used: totalReq,
+      total: null,
+      fmt: fmtNum,
+      totalFmt: 'unlimited (hitung)',
+    },
+    {
+      label: 'Builds Completed',
+      used: b.completed,
+      total: HOBBY_LIMITS.builds,
+      fmt: fmtNum,
+      totalFmt: fmtNum(HOBBY_LIMITS.builds) + ' / hari',
+    },
+    {
+      label: 'Builds Failed',
+      used: b.failed,
+      total: null,
+      fmt: fmtNum,
+      totalFmt: '(dari completed)',
+    },
+    {
+      label: 'Build Time',
+      used: b.seconds / 60,
+      total: null,
+      fmt: v => v.toFixed(1) + ' min',
+      totalFmt: '30 hari',
+    },
+  ];
+
+  return `<section><h2>📊 Ringkasan Akun (30 hari)</h2><div class="summary">${cards.map(c => {
+    const p = c.total ? pct(c.used || 0, c.total) : 0;
     const cls = pctClass(p);
-    let valStr;
-    if (['bandwidth','fastDataTransfer','dataCacheRead','dataCacheWrite'].includes(key)) valStr = fmtBytes(value);
-    else if (key === 'functionDuration') valStr = value.toFixed(2) + ' GB-hrs';
-    else if (key === 'buildMinutes') valStr = value.toFixed(0) + ' min';
-    else valStr = fmtNum(value);
-    let subStr;
-    if (['bandwidth','fastDataTransfer','dataCacheRead','dataCacheWrite'].includes(key)) subStr = fmtBytes(included);
-    else if (key === 'functionDuration') subStr = included + ' GB-hrs';
-    else if (key === 'buildMinutes') subStr = included + ' min';
-    else subStr = fmtNum(included);
     return `<div class="card">
-      <div class="card-label">${label}</div>
-      <div class="card-value">${valStr}</div>
-      <div class="card-sub">dari ${subStr}</div>
-      <div class="bar"><div class="bar-fill ${cls}" style="width:${p}%"></div></div>
-      <div class="card-sub pct ${cls}" style="margin-top:6px">${p.toFixed(1)}%</div>
+      <div class="card-label">${c.label}</div>
+      <div class="card-value">${c.fmt(c.used || 0)}</div>
+      <div class="card-sub">${c.total ? 'limit ' + c.totalFmt : c.totalFmt}</div>
+      ${c.total ? `<div class="bar"><div class="bar-fill ${cls}" style="width:${p}%"></div></div>
+      <div class="card-sub pct ${cls}" style="margin-top:6px">${p.toFixed(1)}%</div>` : ''}
     </div>`;
-  }).filter(Boolean).join('');
-  return `<section><h2>📊 Ringkasan Akun</h2><div class="summary">${cards}</div></section>`;
+  }).join('')}</div></section>`;
 }
 
-function renderAlerts({ usage }) {
-  const u = {}; for (const item of (usage.usage || [])) u[item.name] = item;
-  const labels = {
-    bandwidth: 'Bandwidth',
-    fastDataTransfer: 'Fast Data Transfer',
-    invocations: 'Function Invocations',
-    functionDuration: 'Function Duration',
-    edgeFunctionInvocations: 'Edge Function Invocations',
-    edgeMiddlewareInvocations: 'Edge Middleware Invocations',
-    buildMinutes: 'Build Minutes',
-    imageOptimizations: 'Image Optimizations',
-  };
-  const alerts = [];
-  for (const [key, name] of Object.entries(labels)) {
-    const item = u[key]; if (!item) continue;
-    const p = pct(item.value || 0, item.included?.value || 0);
-    if (p >= 70) {
-      const level = p >= 95 ? '🚨 KRITIS' : p >= 85 ? '⚠️ TINGGI' : '⏰ WASPADA';
-      const cls = p >= 95 ? 'crit' : p >= 85 ? '' : 'warn';
-      alerts.push({ level, name, p, cls, item });
-    }
-  }
+function renderAlerts({ requests }) {
+  const r = aggregateRequests(requests) || {};
+  const b = aggregateRequests(requests);
+  const checks = [
+    { name: 'Bandwidth Out', used: r.bandwidth_outgoing_bytes, total: HOBBY_LIMITS.bandwidth, fmt: fmtBytes },
+    { name: 'Function Duration', used: r.function_execution_successful_gb_hours, total: HOBBY_LIMITS.functionExecution, fmt: v => v.toFixed(2)+' GB-hrs' },
+    { name: 'Function Invocations', used: r.function_invocation_successful_count, total: 1000000, fmt: fmtNum },
+  ];
+  const alerts = checks.map(c => {
+    const p = pct(c.used || 0, c.total);
+    if (p < 70) return null;
+    const level = p >= 95 ? '🚨 KRITIS' : p >= 85 ? '⚠️ TINGGI' : '⏰ WASPADA';
+    const cls = p >= 95 ? 'crit' : p >= 85 ? '' : 'warn';
+    return { level, name: c.name, p, cls, used: c.fmt(c.used || 0), total: c.fmt(c.total) };
+  }).filter(Boolean);
+
   if (!alerts.length) return '<section><h2>⚡ Alerts</h2><div class="empty">✅ Semua resource di bawah 70%. Aman.</div></section>';
-  return `<section><h2>⚡ Alerts (${alerts.length})</h2>${alerts.map(a => {
-    const used = (a.name.includes('Bandwidth') || a.name.includes('Data')) ? fmtBytes(a.item.value) : (a.name.includes('Duration') ? a.item.value.toFixed(2)+' GB-hrs' : fmtNum(a.item.value));
-    const incl = (a.name.includes('Bandwidth') || a.name.includes('Data')) ? fmtBytes(a.item.included?.value) : (a.name.includes('Duration') ? a.item.included?.value+' GB-hrs' : fmtNum(a.item.included?.value));
-    return `<div class="alert ${a.cls}"><span class="level">${a.level}</span> <b>${a.name}</b> sudah ${a.p.toFixed(1)}% (${used} dari ${incl})</div>`;
-  }).join('')}</section>`;
+  return `<section><h2>⚡ Alerts (${alerts.length})</h2>${alerts.map(a => `
+    <div class="alert ${a.cls}"><span class="level">${a.level}</span> <b>${a.name}</b> sudah ${a.p.toFixed(1)}% (${a.used} dari ${a.total})</div>
+  `).join('')}</section>`;
 }
 
-async function renderProjects(projects) {
+async function renderProjects(projects, requests) {
   if (!projects.length) return '<section><h2>📦 Projects</h2><div class="empty">Tidak ada project.</div></section>';
+
+  const totalBw = requests?.data?.reduce((s, d) => s + (d.bandwidth_outgoing_bytes || 0), 0) || 0;
+  const breakdown = requests?.data?.[requests.data.length - 1]?.breakdown;
+
   const rows = await Promise.all(projects.map(async p => {
-    let detail = { deploys: [] };
+    let detail = { deploys: [], reqData: null };
     try { detail = await fetchProjectDetail(p.id); } catch {}
     const last = detail.deploys[0];
     const state = last?.readyState || '—';
     const dotClass = state === 'READY' ? 'ready' : state === 'ERROR' ? 'error' : state === 'BUILDING' ? 'building' : '';
+
     let usageStr = '—';
-    if (detail.projUsage?.usage) {
-      const bw = detail.projUsage.usage.find(x => x.name === 'bandwidth');
-      if (bw?.included?.value) {
-        const pPct = pct(bw.value || 0, bw.included.value);
-        usageStr = `<span class="pct ${pctClass(pPct)}">${pPct.toFixed(0)}% bw</span>`;
-      }
+    if (detail.reqData?.data) {
+      const projBw = detail.reqData.data.reduce((s, d) => s + (d.bandwidth_outgoing_bytes || 0), 0);
+      const pctBw = totalBw ? (projBw / totalBw) * 100 : 0;
+      usageStr = `<span class="pct ${pctClass(pctBw)}">${pctBw.toFixed(0)}%</span> ${fmtBytes(projBw)}`;
     }
+
     const url = detail.proj?.link?.production || detail.proj?.link?.deployment;
     return `<tr>
       <td><a href="https://vercel.com/dashboard/${p.id}" target="_blank">${p.name}</a>${url ? ` · <a href="${url}" target="_blank">↗</a>` : ''}</td>
@@ -273,8 +359,9 @@ async function renderProjects(projects) {
       <td>${fmtDate(p.updatedAt)}</td>
     </tr>`;
   }));
+
   return `<section><h2>📦 Projects (${projects.length})</h2>
-    <table><thead><tr><th>Name</th><th>Last Deploy</th><th>Bandwidth</th><th>Updated</th></tr></thead>
+    <table><thead><tr><th>Name</th><th>Last Deploy</th><th>Bandwidth (30d)</th><th>Updated</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table></section>`;
 }
 
@@ -283,9 +370,10 @@ function renderError(msg) {
     <h2>⚠️ Gagal memuat data</h2>
     <p>${msg}</p>
     <div class="token-setup" style="margin-top:20px;text-align:left">
-      <h2>🔑 Override Token Vercel</h2>
+      <h2>🔑 Override Token</h2>
       <p>Token embed mungkin expired. Masukkan token baru (disimpan di browser ini saja).</p>
       <input id="tok-input" type="password" placeholder="vcp_xxx atau pat_xxx" />
+      <input id="team-input" placeholder="teamId (opsional, contoh: team_xxx)" />
       <button class="btn" id="tok-save">Simpan & Coba Lagi</button>
     </div>
   </div>`;
@@ -297,18 +385,18 @@ async function refresh() {
   if (btn) btn.disabled = true;
   try {
     const data = await fetchOverview();
-    const html = renderHeader(data) + renderSummary(data) + renderAlerts(data) + '<div id="projects-area">Memuat projects...</div>';
-    document.getElementById('root').innerHTML = html;
+    document.getElementById('root').innerHTML =
+      renderHeader() + renderSummary(data) + renderAlerts(data) + '<div id="projects-area">Memuat projects...</div>';
     document.getElementById('last-update').textContent = '· ' + new Date().toLocaleTimeString('id-ID');
     bindActions();
-    renderProjects(data.projects).then(h => { document.getElementById('projects-area').innerHTML = h; });
+    renderProjects(data.projects, data.requests).then(h => { document.getElementById('projects-area').innerHTML = h; });
   } catch (e) {
     document.getElementById('root').innerHTML = renderError(e.message);
     document.getElementById('tok-save').onclick = () => {
       const v = document.getElementById('tok-input').value.trim();
-      if (!v) return;
-      localStorage.setItem(STORAGE_KEY, v);
-      VERCEL_TOKEN = v;
+      const t = document.getElementById('team-input').value.trim();
+      if (v) { localStorage.setItem(STORAGE_KEY, v); VERCEL_TOKEN = v; }
+      if (t) { localStorage.setItem(TEAM_KEY, t); TEAM_ID = t; }
       refresh();
     };
   }
@@ -319,7 +407,13 @@ function bindActions() {
   const r = document.getElementById('refresh');
   const l = document.getElementById('logout');
   if (r) r.onclick = refresh;
-  if (l) l.onclick = () => { localStorage.removeItem(STORAGE_KEY); VERCEL_TOKEN = EMBEDDED_TOKEN; refresh(); };
+  if (l) l.onclick = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(TEAM_KEY);
+    VERCEL_TOKEN = EMBEDDED_TOKEN;
+    TEAM_ID = EMBEDDED_TEAM;
+    refresh();
+  };
 }
 
 refresh();
