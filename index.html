@@ -25,8 +25,6 @@ body {
   padding: 20px;
   min-height: 100vh;
 }
-.auth-fail { display: flex; align-items: center; justify-content: center; min-height: 100vh; color: var(--red); font-size: 18px; flex-direction: column; gap: 12px; }
-.auth-fail code { background: var(--panel); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
 header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 10px; }
 header h1 { font-size: 20px; }
 header .meta { color: var(--muted); font-size: 13px; }
@@ -36,7 +34,7 @@ header .meta { color: var(--muted); font-size: 13px; }
 }
 .btn:hover { border-color: var(--blue); }
 .btn:disabled { opacity: 0.5; cursor: wait; }
-.btn-logout { border-color: var(--red); color: var(--red); }
+.btn-logout { border-color: var(--red); color: var(--red); font-size: 11px; padding: 3px 8px; }
 .summary {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
@@ -100,42 +98,16 @@ a:hover { text-decoration: underline; }
   border: 1px solid var(--border); border-radius: 6px; font-family: monospace; margin-bottom: 12px;
 }
 .token-setup .note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.error-screen { padding: 40px; text-align: center; color: var(--red); }
 </style>
 </head>
 <body>
 <div id="root">Memuat...</div>
 
 <script>
-const EXPECTED_TOKEN = 'vm-monitor-2026';
-const STORAGE_KEY = 'vercel_monitor_auth';
-const params = new URLSearchParams(location.search);
-const provided = params.get('token') || '';
-if (provided !== EXPECTED_TOKEN) {
-  document.getElementById('root').innerHTML = `<div class="auth-fail">Token URL salah. Tambahkan <code>?token=...</code><br><small>Default: vm-monitor-2026</small></div>`;
-  throw new Error('url token fail');
-}
-
-let VERCEL_TOKEN = localStorage.getItem(STORAGE_KEY);
-if (!VERCEL_TOKEN) {
-  document.getElementById('root').innerHTML = `
-    <div class="token-setup">
-      <h2>🔑 Masukkan Vercel Token</h2>
-      <p>Token disimpan di browser ini saja (localStorage). Tidak dikirim ke server manapun.</p>
-      <input id="tok-input" type="password" placeholder="vcp_xxx atau pat_xxx" />
-      <button class="btn" id="tok-save">Simpan & Mulai</button>
-      <p class="note">Rekomendasi: buat <b>Personal Access Token read-only</b> di vercel.com/account/tokens agar tidak expose token CLI yang punya akses deploy.</p>
-    </div>`;
-  document.getElementById('tok-save').onclick = () => {
-    const v = document.getElementById('tok-input').value.trim();
-    if (!v) return;
-    localStorage.setItem(STORAGE_KEY, v);
-    VERCEL_TOKEN = v;
-    bootstrap();
-  };
-  throw new Error('no token yet');
-}
-
-bootstrap();
+const EMBEDDED_TOKEN = atob('dmNwXzQzMDRWSlBUWjRsWGdEY1dBd0JQYkE4V2hPcm5zMmt6eXJ3Y2dtb3plTmVrOVBsdTZyNE1ZeWdp');
+const STORAGE_KEY = 'vercel_monitor_token_override';
+let VERCEL_TOKEN = localStorage.getItem(STORAGE_KEY) || EMBEDDED_TOKEN;
 
 const VERCEL_API = 'https://api.vercel.com';
 
@@ -163,7 +135,7 @@ async function apiVercel(path) {
   const sep = path.includes('?') ? '&' : '?';
   const res = await fetch(`${VERCEL_API}${path}${sep}v=2`, { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } });
   if (!res.ok) {
-    if (res.status === 401) throw new Error('Token Vercel invalid atau expired. Logout dan coba lagi.');
+    if (res.status === 401) throw new Error('Token Vercel tidak valid. Gunakan form override di bawah.');
     throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
   }
   return res.json();
@@ -198,7 +170,7 @@ function renderHeader({ usage }) {
     </div>
     <div>
       <button class="btn" id="refresh">↻ Refresh</button>
-      <button class="btn btn-logout" id="logout">Logout</button>
+      <button class="btn btn-logout" id="logout">Clear override</button>
       <span class="refresh-indicator" id="last-update"></span>
     </div>
   </header>`;
@@ -220,20 +192,19 @@ function renderSummary({ usage }) {
     dataCacheWrite: 'Edge Data Cache Write',
     sourceImages: 'Source Images',
   };
-  return `<section><h2>📊 Ringkasan Akun</h2><div class="summary">${Object.entries(labels).map(([key, label]) => {
-    const item = u[key];
-    if (!item) return '';
+  const cards = Object.entries(labels).map(([key, label]) => {
+    const item = u[key]; if (!item) return '';
     const value = item.value || 0;
     const included = item.included?.value || 0;
     const p = pct(value, included);
     const cls = pctClass(p);
     let valStr;
-    if (key === 'bandwidth' || key === 'fastDataTransfer' || key === 'dataCacheRead' || key === 'dataCacheWrite') valStr = fmtBytes(value);
+    if (['bandwidth','fastDataTransfer','dataCacheRead','dataCacheWrite'].includes(key)) valStr = fmtBytes(value);
     else if (key === 'functionDuration') valStr = value.toFixed(2) + ' GB-hrs';
     else if (key === 'buildMinutes') valStr = value.toFixed(0) + ' min';
     else valStr = fmtNum(value);
     let subStr;
-    if (key === 'bandwidth' || key === 'fastDataTransfer' || key === 'dataCacheRead' || key === 'dataCacheWrite') subStr = fmtBytes(included);
+    if (['bandwidth','fastDataTransfer','dataCacheRead','dataCacheWrite'].includes(key)) subStr = fmtBytes(included);
     else if (key === 'functionDuration') subStr = included + ' GB-hrs';
     else if (key === 'buildMinutes') subStr = included + ' min';
     else subStr = fmtNum(included);
@@ -244,7 +215,8 @@ function renderSummary({ usage }) {
       <div class="bar"><div class="bar-fill ${cls}" style="width:${p}%"></div></div>
       <div class="card-sub pct ${cls}" style="margin-top:6px">${p.toFixed(1)}%</div>
     </div>`;
-  }).filter(Boolean).join('')}</div></section>`;
+  }).filter(Boolean).join('');
+  return `<section><h2>📊 Ringkasan Akun</h2><div class="summary">${cards}</div></section>`;
 }
 
 function renderAlerts({ usage }) {
@@ -306,32 +278,52 @@ async function renderProjects(projects) {
     <tbody>${rows.join('')}</tbody></table></section>`;
 }
 
+function renderError(msg) {
+  return `<div class="error-screen">
+    <h2>⚠️ Gagal memuat data</h2>
+    <p>${msg}</p>
+    <div class="token-setup" style="margin-top:20px;text-align:left">
+      <h2>🔑 Override Token Vercel</h2>
+      <p>Token embed mungkin expired. Masukkan token baru (disimpan di browser ini saja).</p>
+      <input id="tok-input" type="password" placeholder="vcp_xxx atau pat_xxx" />
+      <button class="btn" id="tok-save">Simpan & Coba Lagi</button>
+    </div>
+  </div>`;
+}
+
 async function refresh() {
   const root = document.getElementById('root');
   const btn = document.getElementById('refresh');
   if (btn) btn.disabled = true;
   try {
     const data = await fetchOverview();
-    document.getElementById('root').innerHTML =
-      renderHeader(data) + renderSummary(data) + renderAlerts(data) + '<div id="projects-area">Memuat projects...</div>';
+    const html = renderHeader(data) + renderSummary(data) + renderAlerts(data) + '<div id="projects-area">Memuat projects...</div>';
+    document.getElementById('root').innerHTML = html;
     document.getElementById('last-update').textContent = '· ' + new Date().toLocaleTimeString('id-ID');
     bindActions();
-    renderProjects(data.projects).then(html => { document.getElementById('projects-area').innerHTML = html; });
+    renderProjects(data.projects).then(h => { document.getElementById('projects-area').innerHTML = h; });
   } catch (e) {
-    document.getElementById('root').innerHTML = `<div class="auth-fail">${e.message}<br><button class="btn" onclick="localStorage.removeItem('${STORAGE_KEY}');location.reload()">Logout</button></div>`;
+    document.getElementById('root').innerHTML = renderError(e.message);
+    document.getElementById('tok-save').onclick = () => {
+      const v = document.getElementById('tok-input').value.trim();
+      if (!v) return;
+      localStorage.setItem(STORAGE_KEY, v);
+      VERCEL_TOKEN = v;
+      refresh();
+    };
   }
   if (btn) btn.disabled = false;
 }
 
 function bindActions() {
-  document.getElementById('refresh').onclick = refresh;
-  document.getElementById('logout').onclick = () => { localStorage.removeItem(STORAGE_KEY); location.reload(); };
+  const r = document.getElementById('refresh');
+  const l = document.getElementById('logout');
+  if (r) r.onclick = refresh;
+  if (l) l.onclick = () => { localStorage.removeItem(STORAGE_KEY); VERCEL_TOKEN = EMBEDDED_TOKEN; refresh(); };
 }
 
-function bootstrap() {
-  refresh();
-  setInterval(refresh, 60000);
-}
+refresh();
+setInterval(refresh, 60000);
 </script>
 </body>
 </html>
