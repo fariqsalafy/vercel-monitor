@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Vercel Monitor</title>
+<style>
+:root {
+  --bg: #0d1117;
+  --panel: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --green: #3fb950;
+  --yellow: #d29922;
+  --orange: #db6d28;
+  --red: #f85149;
+  --blue: #58a6ff;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  padding: 20px;
+  min-height: 100vh;
+}
+.auth-fail { display: flex; align-items: center; justify-content: center; min-height: 100vh; color: var(--red); font-size: 18px; flex-direction: column; gap: 12px; }
+.auth-fail code { background: var(--panel); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 10px; }
+header h1 { font-size: 20px; }
+header .meta { color: var(--muted); font-size: 13px; }
+.btn {
+  background: var(--panel); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
+}
+.btn:hover { border-color: var(--blue); }
+.btn:disabled { opacity: 0.5; cursor: wait; }
+.btn-logout { border-color: var(--red); color: var(--red); }
+.summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+}
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+.card-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.card-value { font-size: 24px; font-weight: 600; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+.card-sub { font-size: 12px; color: var(--muted); }
+.bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 10px; overflow: hidden; }
+.bar-fill { height: 100%; transition: width 0.3s, background 0.3s; }
+.bar-fill.green { background: var(--green); }
+.bar-fill.yellow { background: var(--yellow); }
+.bar-fill.orange { background: var(--orange); }
+.bar-fill.red { background: var(--red); }
+section { margin-bottom: 24px; }
+section h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin-bottom: 12px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; }
+th { color: var(--muted); font-weight: 500; text-transform: uppercase; font-size: 11px; letter-spacing: 0.5px; }
+tr:hover td { background: rgba(255,255,255,0.02); }
+.pct { display: inline-block; min-width: 50px; text-align: right; font-variant-numeric: tabular-nums; }
+.pct.green { color: var(--green); }
+.pct.yellow { color: var(--yellow); }
+.pct.orange { color: var(--orange); }
+.pct.red { color: var(--red); }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-dot.ready { background: var(--green); }
+.status-dot.error { background: var(--red); }
+.status-dot.building { background: var(--yellow); animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.alert {
+  background: rgba(248, 81, 73, 0.1);
+  border: 1px solid var(--red);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.alert.warn { background: rgba(210, 153, 34, 0.1); border-color: var(--yellow); }
+.alert.crit { background: rgba(248, 81, 73, 0.15); }
+.alert .level { font-weight: 600; margin-right: 6px; }
+.empty { color: var(--muted); text-align: center; padding: 24px; font-size: 13px; }
+.refresh-indicator { font-size: 11px; color: var(--muted); }
+a { color: var(--blue); text-decoration: none; }
+a:hover { text-decoration: underline; }
+.token-setup {
+  max-width: 480px; margin: 60px auto; padding: 32px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+}
+.token-setup h2 { margin-bottom: 12px; }
+.token-setup p { color: var(--muted); margin-bottom: 16px; font-size: 14px; line-height: 1.5; }
+.token-setup input {
+  width: 100%; padding: 10px; background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px; font-family: monospace; margin-bottom: 12px;
+}
+.token-setup .note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="root">Memuat...</div>
+
+<script>
+const EXPECTED_TOKEN = 'vm-monitor-2026';
+const STORAGE_KEY = 'vercel_monitor_auth';
+const params = new URLSearchParams(location.search);
+const provided = params.get('token') || '';
+if (provided !== EXPECTED_TOKEN) {
+  document.getElementById('root').innerHTML = `<div class="auth-fail">Token URL salah. Tambahkan <code>?token=...</code><br><small>Default: vm-monitor-2026</small></div>`;
+  throw new Error('url token fail');
+}
+
+let VERCEL_TOKEN = localStorage.getItem(STORAGE_KEY);
+if (!VERCEL_TOKEN) {
+  document.getElementById('root').innerHTML = `
+    <div class="token-setup">
+      <h2>🔑 Masukkan Vercel Token</h2>
+      <p>Token disimpan di browser ini saja (localStorage). Tidak dikirim ke server manapun.</p>
+      <input id="tok-input" type="password" placeholder="vcp_xxx atau pat_xxx" />
+      <button class="btn" id="tok-save">Simpan & Mulai</button>
+      <p class="note">Rekomendasi: buat <b>Personal Access Token read-only</b> di vercel.com/account/tokens agar tidak expose token CLI yang punya akses deploy.</p>
+    </div>`;
+  document.getElementById('tok-save').onclick = () => {
+    const v = document.getElementById('tok-input').value.trim();
+    if (!v) return;
+    localStorage.setItem(STORAGE_KEY, v);
+    VERCEL_TOKEN = v;
+    bootstrap();
+  };
+  throw new Error('no token yet');
+}
+
+bootstrap();
+
+const VERCEL_API = 'https://api.vercel.com';
+
+function fmtBytes(b) {
+  if (b == null) return '—';
+  if (b < 1024) return b + ' B';
+  if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
+  if (b < 1024*1024*1024) return (b/1024/1024).toFixed(1) + ' MB';
+  return (b/1024/1024/1024).toFixed(2) + ' GB';
+}
+function fmtNum(n) { return n == null ? '—' : Number(n).toLocaleString('id-ID'); }
+function pct(used, total) { if (!total) return 0; return Math.min(100, (used / total) * 100); }
+function pctClass(p) { return p >= 95 ? 'red' : p >= 85 ? 'orange' : p >= 70 ? 'yellow' : 'green'; }
+function fmtDate(s) {
+  if (!s) return '—';
+  const diff = (new Date() - new Date(s)) / 1000;
+  if (diff < 60) return Math.floor(diff) + 's';
+  if (diff < 3600) return Math.floor(diff/60) + 'm';
+  if (diff < 86400) return Math.floor(diff/3600) + 'h';
+  return Math.floor(diff/86400) + 'd';
+}
+function daysUntil(s) { return s ? Math.ceil((new Date(s) - new Date()) / 86400000) : null; }
+
+async function apiVercel(path) {
+  const sep = path.includes('?') ? '&' : '?';
+  const res = await fetch(`${VERCEL_API}${path}${sep}v=2`, { headers: { Authorization: `Bearer ${VERCEL_TOKEN}` } });
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('Token Vercel invalid atau expired. Logout dan coba lagi.');
+    throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
+  }
+  return res.json();
+}
+
+async function fetchOverview() {
+  const since = new Date(); since.setDate(since.getDate() - 30);
+  const [usage, projects] = await Promise.all([
+    apiVercel(`/usage?since=${since.toISOString().split('T')[0]}`),
+    apiVercel('/v9/projects?limit=100'),
+  ]);
+  return { usage, projects: projects.projects || [] };
+}
+
+async function fetchProjectDetail(projectId) {
+  const since = new Date(); since.setDate(since.getDate() - 30);
+  const [proj, deploys] = await Promise.all([
+    apiVercel(`/v9/projects/${projectId}`),
+    apiVercel(`/v6/deployments?projectId=${projectId}&limit=1`),
+  ]);
+  let projUsage = null;
+  try { projUsage = await apiVercel(`/projects/${projectId}/usage?since=${since.toISOString().split('T')[0]}`); } catch {}
+  return { proj, deploys: deploys.deployments || [], projUsage };
+}
+
+function renderHeader({ usage }) {
+  const remaining = daysUntil(usage.periodEnd);
+  return `<header>
+    <div>
+      <h1>Vercel Monitor — ${usage.username || 'akun'}</h1>
+      <div class="meta">Plan: <b>${(usage.plan||'?').toUpperCase()}</b> · Reset: ${usage.periodEnd} (${remaining} hari)</div>
+    </div>
+    <div>
+      <button class="btn" id="refresh">↻ Refresh</button>
+      <button class="btn btn-logout" id="logout">Logout</button>
+      <span class="refresh-indicator" id="last-update"></span>
+    </div>
+  </header>`;
+}
+
+function renderSummary({ usage }) {
+  const u = {};
+  for (const item of (usage.usage || [])) u[item.name] = item;
+  const labels = {
+    bandwidth: 'Bandwidth',
+    fastDataTransfer: 'Fast Data Transfer',
+    invocations: 'Function Invocations',
+    functionDuration: 'Function Duration',
+    edgeFunctionInvocations: 'Edge Function Invocations',
+    edgeMiddlewareInvocations: 'Edge Middleware Invocations',
+    buildMinutes: 'Build Minutes',
+    imageOptimizations: 'Image Optimizations',
+    dataCacheRead: 'Edge Data Cache Read',
+    dataCacheWrite: 'Edge Data Cache Write',
+    sourceImages: 'Source Images',
+  };
+  return `<section><h2>📊 Ringkasan Akun</h2><div class="summary">${Object.entries(labels).map(([key, label]) => {
+    const item = u[key];
+    if (!item) return '';
+    const value = item.value || 0;
+    const included = item.included?.value || 0;
+    const p = pct(value, included);
+    const cls = pctClass(p);
+    let valStr;
+    if (key === 'bandwidth' || key === 'fastDataTransfer' || key === 'dataCacheRead' || key === 'dataCacheWrite') valStr = fmtBytes(value);
+    else if (key === 'functionDuration') valStr = value.toFixed(2) + ' GB-hrs';
+    else if (key === 'buildMinutes') valStr = value.toFixed(0) + ' min';
+    else valStr = fmtNum(value);
+    let subStr;
+    if (key === 'bandwidth' || key === 'fastDataTransfer' || key === 'dataCacheRead' || key === 'dataCacheWrite') subStr = fmtBytes(included);
+    else if (key === 'functionDuration') subStr = included + ' GB-hrs';
+    else if (key === 'buildMinutes') subStr = included + ' min';
+    else subStr = fmtNum(included);
+    return `<div class="card">
+      <div class="card-label">${label}</div>
+      <div class="card-value">${valStr}</div>
+      <div class="card-sub">dari ${subStr}</div>
+      <div class="bar"><div class="bar-fill ${cls}" style="width:${p}%"></div></div>
+      <div class="card-sub pct ${cls}" style="margin-top:6px">${p.toFixed(1)}%</div>
+    </div>`;
+  }).filter(Boolean).join('')}</div></section>`;
+}
+
+function renderAlerts({ usage }) {
+  const u = {}; for (const item of (usage.usage || [])) u[item.name] = item;
+  const labels = {
+    bandwidth: 'Bandwidth',
+    fastDataTransfer: 'Fast Data Transfer',
+    invocations: 'Function Invocations',
+    functionDuration: 'Function Duration',
+    edgeFunctionInvocations: 'Edge Function Invocations',
+    edgeMiddlewareInvocations: 'Edge Middleware Invocations',
+    buildMinutes: 'Build Minutes',
+    imageOptimizations: 'Image Optimizations',
+  };
+  const alerts = [];
+  for (const [key, name] of Object.entries(labels)) {
+    const item = u[key]; if (!item) continue;
+    const p = pct(item.value || 0, item.included?.value || 0);
+    if (p >= 70) {
+      const level = p >= 95 ? '🚨 KRITIS' : p >= 85 ? '⚠️ TINGGI' : '⏰ WASPADA';
+      const cls = p >= 95 ? 'crit' : p >= 85 ? '' : 'warn';
+      alerts.push({ level, name, p, cls, item });
+    }
+  }
+  if (!alerts.length) return '<section><h2>⚡ Alerts</h2><div class="empty">✅ Semua resource di bawah 70%. Aman.</div></section>';
+  return `<section><h2>⚡ Alerts (${alerts.length})</h2>${alerts.map(a => {
+    const used = (a.name.includes('Bandwidth') || a.name.includes('Data')) ? fmtBytes(a.item.value) : (a.name.includes('Duration') ? a.item.value.toFixed(2)+' GB-hrs' : fmtNum(a.item.value));
+    const incl = (a.name.includes('Bandwidth') || a.name.includes('Data')) ? fmtBytes(a.item.included?.value) : (a.name.includes('Duration') ? a.item.included?.value+' GB-hrs' : fmtNum(a.item.included?.value));
+    return `<div class="alert ${a.cls}"><span class="level">${a.level}</span> <b>${a.name}</b> sudah ${a.p.toFixed(1)}% (${used} dari ${incl})</div>`;
+  }).join('')}</section>`;
+}
+
+async function renderProjects(projects) {
+  if (!projects.length) return '<section><h2>📦 Projects</h2><div class="empty">Tidak ada project.</div></section>';
+  const rows = await Promise.all(projects.map(async p => {
+    let detail = { deploys: [] };
+    try { detail = await fetchProjectDetail(p.id); } catch {}
+    const last = detail.deploys[0];
+    const state = last?.readyState || '—';
+    const dotClass = state === 'READY' ? 'ready' : state === 'ERROR' ? 'error' : state === 'BUILDING' ? 'building' : '';
+    let usageStr = '—';
+    if (detail.projUsage?.usage) {
+      const bw = detail.projUsage.usage.find(x => x.name === 'bandwidth');
+      if (bw?.included?.value) {
+        const pPct = pct(bw.value || 0, bw.included.value);
+        usageStr = `<span class="pct ${pctClass(pPct)}">${pPct.toFixed(0)}% bw</span>`;
+      }
+    }
+    const url = detail.proj?.link?.production || detail.proj?.link?.deployment;
+    return `<tr>
+      <td><a href="https://vercel.com/dashboard/${p.id}" target="_blank">${p.name}</a>${url ? ` · <a href="${url}" target="_blank">↗</a>` : ''}</td>
+      <td><span class="status-dot ${dotClass}"></span>${state}${last ? ' · ' + fmtDate(last.createdAt) : ''}</td>
+      <td>${usageStr}</td>
+      <td>${fmtDate(p.updatedAt)}</td>
+    </tr>`;
+  }));
+  return `<section><h2>📦 Projects (${projects.length})</h2>
+    <table><thead><tr><th>Name</th><th>Last Deploy</th><th>Bandwidth</th><th>Updated</th></tr></thead>
+    <tbody>${rows.join('')}</tbody></table></section>`;
+}
+
+async function refresh() {
+  const root = document.getElementById('root');
+  const btn = document.getElementById('refresh');
+  if (btn) btn.disabled = true;
+  try {
+    const data = await fetchOverview();
+    document.getElementById('root').innerHTML =
+      renderHeader(data) + renderSummary(data) + renderAlerts(data) + '<div id="projects-area">Memuat projects...</div>';
+    document.getElementById('last-update').textContent = '· ' + new Date().toLocaleTimeString('id-ID');
+    bindActions();
+    renderProjects(data.projects).then(html => { document.getElementById('projects-area').innerHTML = html; });
+  } catch (e) {
+    document.getElementById('root').innerHTML = `<div class="auth-fail">${e.message}<br><button class="btn" onclick="localStorage.removeItem('${STORAGE_KEY}');location.reload()">Logout</button></div>`;
+  }
+  if (btn) btn.disabled = false;
+}
+
+function bindActions() {
+  document.getElementById('refresh').onclick = refresh;
+  document.getElementById('logout').onclick = () => { localStorage.removeItem(STORAGE_KEY); location.reload(); };
+}
+
+function bootstrap() {
+  refresh();
+  setInterval(refresh, 60000);
+}
+</script>
+</body>
+</html>
