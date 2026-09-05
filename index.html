@@ -118,15 +118,59 @@ let TEAM_ID = localStorage.getItem(TEAM_KEY) || EMBEDDED_TEAM;
 
 const VERCEL_API = 'https://api.vercel.com';
 
-const PRO_LIMITS = {
-  includedCredit: 20,
-  bandwidth: 1 * 1024 ** 4,
-  edgeRequests: 10_000_000,
-  functionMaxDuration: 300,
-  functionDefaultDuration: 15,
-  buildsPerDay: 6000,
-  buildMinutesPerDeploy: 45,
+const PLAN_LIMITS = {
+  hobby: {
+    label: 'HOBBY',
+    includedCredit: 0,
+    bandwidth: 100 * 1024 ** 3,
+    bandwidthLabel: '100 GB included',
+    edgeRequests: 1_000_000,
+    edgeRequestsLabel: '1M included',
+    functionInvocations: 1_000_000,
+    functionInvocationsLabel: '1M included',
+    buildsPerDay: 100,
+    buildsPerDayLabel: '100/hari',
+    buildMinutesPerDeploy: 45,
+    concurrentDeploys: 1,
+    imageOptimizations: 1000,
+    imageOptimizationsLabel: '1000 included',
+  },
+  pro: {
+    label: 'PRO',
+    includedCredit: 20,
+    bandwidth: 1 * 1024 ** 4,
+    bandwidthLabel: '1 TB included',
+    edgeRequests: 10_000_000,
+    edgeRequestsLabel: '10M included',
+    functionInvocations: null,
+    functionInvocationsLabel: '$0.60 / 1M (pay-as-you-go)',
+    buildsPerDay: 6000,
+    buildsPerDayLabel: '6000/hari',
+    buildMinutesPerDeploy: 45,
+    concurrentDeploys: 500,
+    imageOptimizations: 5000,
+    imageOptimizationsLabel: '5000 included',
+  },
+  enterprise: {
+    label: 'ENTERPRISE',
+    includedCredit: null,
+    bandwidth: null,
+    bandwidthLabel: 'Custom (hubungi sales)',
+    edgeRequests: null,
+    edgeRequestsLabel: 'Custom',
+    functionInvocations: null,
+    functionInvocationsLabel: 'Custom',
+    buildsPerDay: null,
+    buildsPerDayLabel: 'Custom',
+    buildMinutesPerDeploy: 45,
+    concurrentDeploys: 500,
+    imageOptimizations: null,
+    imageOptimizationsLabel: 'Custom',
+  },
 };
+
+let ACTIVE_PLAN = 'pro';
+function L() { return PLAN_LIMITS[ACTIVE_PLAN] || PLAN_LIMITS.pro; }
 
 function fmtBytes(b) {
   if (b == null) return '—';
@@ -194,7 +238,9 @@ async function fetchOverview() {
     fetchUsage('builds'),
     fetchBilling(),
   ]);
-  return { team, projects: projects.projects || [], requests, builds, billing };
+  const planKey = (team?.billing?.plan || 'pro').toLowerCase();
+  if (PLAN_LIMITS[planKey]) ACTIVE_PLAN = planKey;
+  return { team, projects: projects.projects || [], requests, builds, billing, planKey: ACTIVE_PLAN };
 }
 
 async function fetchProjectDetail(projectId) {
@@ -244,7 +290,7 @@ function aggregateBillingByCategory(charges) {
 }
 
 function renderHeader(team) {
-  const planName = team?.billing?.plan?.toUpperCase() || 'PRO';
+  const planName = (team?.billing?.plan || 'pro').toUpperCase();
   const planIter = team?.billing?.planIteration || '';
   const period = team?.billing?.period;
   const remaining = period ? Math.ceil((period.end - Date.now()) / 86400000) : null;
@@ -263,14 +309,33 @@ function renderHeader(team) {
 
 function renderBillingCard(billing) {
   const total = billing.total || 0;
-  const creditUsed = (total / PRO_LIMITS.includedCredit) * 100;
-  const remaining = Math.max(0, PRO_LIMITS.includedCredit - total);
+  const includedCredit = L().includedCredit;
+  if (includedCredit == null) {
+    return `<section><h2>💳 Billing Credit</h2><div class="summary">
+      <div class="card featured">
+        <div class="card-label">Biaya Terpakai (30 hari)</div>
+        <div class="card-value large">${fmtMoney(total)}</div>
+        <div class="card-sub">Plan ${L().label} — credit custom, hubungi sales untuk detail</div>
+      </div>
+    </div></section>`;
+  }
+  if (includedCredit === 0) {
+    return `<section><h2>💳 Billing</h2><div class="summary">
+      <div class="card featured">
+        <div class="card-label">Biaya Terpakai (30 hari)</div>
+        <div class="card-value large">${fmtMoney(total)}</div>
+        <div class="card-sub">Plan ${L().label} — tidak ada credit included. Charge penuh ter-bill.</div>
+      </div>
+    </div></section>`;
+  }
+  const creditUsed = (total / includedCredit) * 100;
+  const remaining = Math.max(0, includedCredit - total);
   const cls = pctClass(creditUsed);
   return `<section><h2>💳 Billing Credit</h2><div class="summary">
     <div class="card featured">
       <div class="card-label">Credit Terpakai (30 hari)</div>
       <div class="card-value large">${fmtMoney(total)}</div>
-      <div class="card-sub">dari $${PRO_LIMITS.includedCredit} included · sisa ${fmtMoney(remaining)}</div>
+      <div class="card-sub">dari $${includedCredit} included · sisa ${fmtMoney(remaining)}</div>
       <div class="bar"><div class="bar-fill ${cls}" style="width:${Math.min(creditUsed, 100)}%"></div></div>
       <div class="card-sub pct ${cls}" style="margin-top:6px">${creditUsed.toFixed(1)}% used</div>
     </div>
@@ -298,17 +363,17 @@ function renderSummary({ requests, builds }) {
   const totalReq = (r.request_hit_count || 0) + (r.request_miss_count || 0);
 
   const cards = [
-    { label: 'Bandwidth Out', used: r.bandwidth_outgoing_bytes, total: PRO_LIMITS.bandwidth, fmt: fmtBytes, totalFmt: '1 TB included' },
+    { label: 'Bandwidth Out', used: r.bandwidth_outgoing_bytes, total: L().bandwidth, fmt: fmtBytes, totalFmt: L().bandwidthLabel },
     { label: 'Bandwidth In', used: r.bandwidth_incoming_bytes, total: null, fmt: fmtBytes, totalFmt: 'Fast Origin Transfer' },
-    { label: 'Edge Requests', used: totalReq, total: PRO_LIMITS.edgeRequests, fmt: fmtNum, totalFmt: '10M included' },
-    { label: 'Function Invocations', used: r.function_invocation_successful_count, total: null, fmt: fmtNum, totalFmt: '$0.60/1M' },
+    { label: 'Edge Requests', used: totalReq, total: L().edgeRequests, fmt: fmtNum, totalFmt: L().edgeRequestsLabel },
+    { label: 'Function Invocations', used: r.function_invocation_successful_count, total: L().functionInvocations, fmt: fmtNum, totalFmt: L().functionInvocationsLabel },
     { label: 'Function Errors', used: r.function_invocation_error_count, total: null, fmt: fmtNum, totalFmt: 'pay-as-you-go' },
     { label: 'Function Duration', used: r.function_execution_successful_gb_hours, total: null, fmt: v => v.toFixed(2) + ' GB-hrs', totalFmt: 'Active CPU $0.128/hr' },
     { label: 'Cache Hits', used: r.request_hit_count, total: null, fmt: fmtNum, totalFmt: 'free' },
     { label: 'Cache Misses', used: r.request_miss_count, total: null, fmt: fmtNum, totalFmt: 'real invocations' },
-    { label: 'Builds Completed', used: b.completed, total: PRO_LIMITS.buildsPerDay, fmt: fmtNum, totalFmt: '6000/hari' },
+    { label: 'Builds Completed', used: b.completed, total: L().buildsPerDay, fmt: fmtNum, totalFmt: L().buildsPerDayLabel },
     { label: 'Builds Failed', used: b.failed, total: null, fmt: fmtNum, totalFmt: `${((b.failed / Math.max(b.completed, 1)) * 100).toFixed(1)}% fail rate` },
-    { label: 'Total Build Time', used: b.seconds / 60, total: null, fmt: v => v.toFixed(1) + ' min', totalFmt: 'max 45 min/deploy' },
+    { label: 'Total Build Time', used: b.seconds / 60, total: null, fmt: v => v.toFixed(1) + ' min', totalFmt: `max ${L().buildMinutesPerDeploy} min/deploy` },
   ];
 
   return `<section><h2>📊 Pemakaian 30 Hari</h2><div class="summary">${cards.map(c => {
@@ -328,17 +393,22 @@ function renderAlerts({ requests, billing }) {
   const alerts = [];
   const r = aggregateRequests(requests) || {};
 
-  const creditPct = (billing.total || 0) / PRO_LIMITS.includedCredit * 100;
-  if (creditPct >= 70) {
-    const lvl = creditPct >= 95 ? '🚨 KRITIS' : creditPct >= 85 ? '⚠️ TINGGI' : '⏰ WASPADA';
-    const cls = creditPct >= 95 ? 'crit' : creditPct >= 85 ? '' : 'warn';
-    alerts.push({ lvl, cls, txt: `Credit $${PRO_LIMITS.includedCredit}/bln sudah ${creditPct.toFixed(0)}% terpakai (${fmtMoney(billing.total)}). Akan kena on-demand billing setelah credit habis.` });
+  const includedCredit = L().includedCredit;
+  if (includedCredit && includedCredit > 0) {
+    const creditPct = (billing.total || 0) / includedCredit * 100;
+    if (creditPct >= 70) {
+      const lvl = creditPct >= 95 ? '🚨 KRITIS' : creditPct >= 85 ? '⚠️ TINGGI' : '⏰ WASPADA';
+      const cls = creditPct >= 95 ? 'crit' : creditPct >= 85 ? '' : 'warn';
+      alerts.push({ lvl, cls, txt: `Credit $${includedCredit}/bln sudah ${creditPct.toFixed(0)}% terpakai (${fmtMoney(billing.total)}). Akan kena on-demand billing setelah credit habis.` });
+    }
+  } else if (billing.total > 5) {
+    alerts.push({ lvl: '💰 INFO', cls: 'info', txt: `Plan ${L().label} tidak punya included credit. Biaya ${fmtMoney(billing.total)} murni on-demand.` });
   }
 
-  const bwPct = pct(r.bandwidth_outgoing_bytes || 0, PRO_LIMITS.bandwidth);
+  const bwPct = L().bandwidth ? pct(r.bandwidth_outgoing_bytes || 0, L().bandwidth) : 0;
   if (bwPct >= 70) {
     const lvl = bwPct >= 95 ? '🚨 KRITIS' : '⚠️ TINGGI';
-    alerts.push({ lvl, cls: bwPct >= 95 ? 'crit' : '', txt: `Bandwidth mendekati 1 TB included (${bwPct.toFixed(0)}% = ${fmtBytes(r.bandwidth_outgoing_bytes)}).` });
+    alerts.push({ lvl, cls: bwPct >= 95 ? 'crit' : '', txt: `Bandwidth mendekati ${L().bandwidthLabel} (${bwPct.toFixed(0)}% = ${fmtBytes(r.bandwidth_outgoing_bytes)}).` });
   }
 
   if ((r.function_invocation_error_count || 0) > 1000) {
@@ -346,7 +416,7 @@ function renderAlerts({ requests, billing }) {
   }
 
   if (!alerts.length) {
-    alerts.push({ lvl: '✅ INFO', cls: 'info', txt: `Semua aman. Credit terpakai ${creditPct.toFixed(0)}%, bandwidth ${bwPct.toFixed(0)}%.` });
+    alerts.push({ lvl: '✅ INFO', cls: 'info', txt: `Plan ${L().label} aktif. Credit terpakai ${(includedCredit && billing.total ? (billing.total / includedCredit * 100).toFixed(0) : '—')}% · bandwidth ${(L().bandwidth ? bwPct.toFixed(0) : '—')}%.` });
   }
 
   return `<section><h2>⚡ Alerts (${alerts.length})</h2>${alerts.map(a => `
