@@ -28,6 +28,7 @@ body {
 header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 10px; }
 header h1 { font-size: 20px; }
 header .meta { color: var(--muted); font-size: 13px; }
+header .meta b { color: var(--text); }
 .btn {
   background: var(--panel); border: 1px solid var(--border); color: var(--text);
   padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px;
@@ -47,8 +48,10 @@ header .meta { color: var(--muted); font-size: 13px; }
   border-radius: 8px;
   padding: 16px;
 }
+.card.featured { border-color: var(--blue); }
 .card-label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
 .card-value { font-size: 24px; font-weight: 600; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+.card-value.large { font-size: 32px; }
 .card-sub { font-size: 12px; color: var(--muted); }
 .bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 10px; overflow: hidden; }
 .bar-fill { height: 100%; transition: width 0.3s, background 0.3s; }
@@ -82,6 +85,7 @@ tr:hover td { background: rgba(255,255,255,0.02); }
 }
 .alert.warn { background: rgba(210, 153, 34, 0.1); border-color: var(--yellow); }
 .alert.crit { background: rgba(248, 81, 73, 0.15); }
+.alert.info { background: rgba(88, 166, 255, 0.1); border-color: var(--blue); }
 .alert .level { font-weight: 600; margin-right: 6px; }
 .empty { color: var(--muted); text-align: center; padding: 24px; font-size: 13px; }
 .refresh-indicator { font-size: 11px; color: var(--muted); }
@@ -114,13 +118,14 @@ let TEAM_ID = localStorage.getItem(TEAM_KEY) || EMBEDDED_TEAM;
 
 const VERCEL_API = 'https://api.vercel.com';
 
-const HOBBY_LIMITS = {
-  bandwidth: 100 * 1024 ** 3,
-  functionExecution: 100,
-  edgeFunctionInvocations: 500000,
-  edgeMiddlewareInvocations: 1000000,
-  imageOptimizations: 1000,
-  builds: 6000,
+const PRO_LIMITS = {
+  includedCredit: 20,
+  bandwidth: 1 * 1024 ** 4,
+  edgeRequests: 10_000_000,
+  functionMaxDuration: 300,
+  functionDefaultDuration: 15,
+  buildsPerDay: 6000,
+  buildMinutesPerDeploy: 45,
 };
 
 function fmtBytes(b) {
@@ -128,9 +133,11 @@ function fmtBytes(b) {
   if (b < 1024) return b + ' B';
   if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
   if (b < 1024*1024*1024) return (b/1024/1024).toFixed(1) + ' MB';
-  return (b/1024/1024/1024).toFixed(2) + ' GB';
+  if (b < 1024*1024*1024*1024) return (b/1024/1024/1024).toFixed(2) + ' GB';
+  return (b/1024/1024/1024/1024).toFixed(2) + ' TB';
 }
 function fmtNum(n) { return n == null ? '—' : Number(n).toLocaleString('id-ID'); }
+function fmtMoney(v) { return '$' + v.toFixed(2); }
 function pct(used, total) { if (!total) return 0; return Math.min(100, (used / total) * 100); }
 function pctClass(p) { return p >= 95 ? 'red' : p >= 85 ? 'orange' : p >= 70 ? 'yellow' : 'green'; }
 function fmtDate(s) {
@@ -166,17 +173,31 @@ async function fetchUsage(type, opts = {}) {
   return apiVercel(`/v2/usage?${params}`);
 }
 
+async function fetchBilling() {
+  const { from, to } = periodRange();
+  const params = new URLSearchParams({ from: from.split('T')[0], to: to.split('T')[0] });
+  if (TEAM_ID) params.set('teamId', TEAM_ID);
+  const res = await fetch(`${VERCEL_API}/v1/billing/charges?${params}`, {
+    headers: { Authorization: `Bearer ${VERCEL_TOKEN}` }
+  });
+  if (!res.ok) return { charges: [], total: 0 };
+  const text = await res.text();
+  const charges = text.trim().split('\n').filter(l => l).map(l => JSON.parse(l));
+  return { charges, total: charges.reduce((s, c) => s + (c.BilledCost || 0), 0) };
+}
+
 async function fetchOverview() {
-  const [projects, requests, builds] = await Promise.all([
+  const [team, projects, requests, builds, billing] = await Promise.all([
+    apiVercel(`/v1/teams/${TEAM_ID}`),
     apiVercel(`/v9/projects?limit=100${TEAM_ID ? `&teamId=${TEAM_ID}` : ''}`),
     fetchUsage('requests'),
     fetchUsage('builds'),
+    fetchBilling(),
   ]);
-  return { projects: projects.projects || [], requests, builds };
+  return { team, projects: projects.projects || [], requests, builds, billing };
 }
 
 async function fetchProjectDetail(projectId) {
-  const since = new Date(); since.setDate(since.getDate() - 30);
   const [proj, deploys, reqData] = await Promise.all([
     apiVercel(`/v9/projects/${projectId}${TEAM_ID ? `?teamId=${TEAM_ID}` : ''}`),
     apiVercel(`/v6/deployments?projectId=${projectId}&limit=1${TEAM_ID ? `&teamId=${TEAM_ID}` : ''}`),
@@ -195,9 +216,8 @@ function aggregateRequests(reqData) {
     acc.function_execution_successful_gb_hours += day.function_execution_successful_gb_hours || 0;
     acc.request_hit_count += day.request_hit_count || 0;
     acc.request_miss_count += day.request_miss_count || 0;
-    acc.monitoring_metric_count += day.monitoring_metric_count || 0;
     return acc;
-  }, { bandwidth_outgoing_bytes: 0, bandwidth_incoming_bytes: 0, function_invocation_successful_count: 0, function_invocation_error_count: 0, function_execution_successful_gb_hours: 0, request_hit_count: 0, request_miss_count: 0, monitoring_metric_count: 0 });
+  }, { bandwidth_outgoing_bytes: 0, bandwidth_incoming_bytes: 0, function_invocation_successful_count: 0, function_invocation_error_count: 0, function_execution_successful_gb_hours: 0, request_hit_count: 0, request_miss_count: 0 });
 }
 
 function aggregateBuilds(buildsData) {
@@ -211,11 +231,27 @@ function aggregateBuilds(buildsData) {
   }, { completed: 0, failed: 0, seconds: 0, queued: 0 });
 }
 
-function renderHeader() {
+function aggregateBillingByCategory(charges) {
+  const by = {};
+  for (const c of charges) {
+    const cat = c.ServiceCategory || c.ServiceName || 'Other';
+    if (!by[cat]) by[cat] = { cost: 0, qty: 0, unit: '' };
+    by[cat].cost += c.BilledCost || 0;
+    by[cat].qty += c.ConsumedQuantity || 0;
+    by[cat].unit = c.ConsumedUnit || '';
+  }
+  return by;
+}
+
+function renderHeader(team) {
+  const planName = team?.billing?.plan?.toUpperCase() || 'PRO';
+  const planIter = team?.billing?.planIteration || '';
+  const period = team?.billing?.period;
+  const remaining = period ? Math.ceil((period.end - Date.now()) / 86400000) : null;
   return `<header>
     <div>
-      <h1>Vercel Monitor — smpabbs</h1>
-      <div class="meta">Plan: <b>HOBBY</b> · 30 hari terakhir · ${TEAM_ID ? 'Team ID aktif' : 'Personal'}</div>
+      <h1>Vercel Monitor — ${team?.name || 'smpabbs'}</h1>
+      <div class="meta">Plan: <b>${planName}${planIter ? ' ' + planIter : ''}</b> · ${remaining != null ? `Reset: ${remaining} hari lagi` : '30 hari terakhir'}</div>
     </div>
     <div>
       <button class="btn" id="refresh">↻ Refresh</button>
@@ -225,109 +261,96 @@ function renderHeader() {
   </header>`;
 }
 
+function renderBillingCard(billing) {
+  const total = billing.total || 0;
+  const creditUsed = (total / PRO_LIMITS.includedCredit) * 100;
+  const remaining = Math.max(0, PRO_LIMITS.includedCredit - total);
+  const cls = pctClass(creditUsed);
+  return `<section><h2>💳 Billing Credit</h2><div class="summary">
+    <div class="card featured">
+      <div class="card-label">Credit Terpakai (30 hari)</div>
+      <div class="card-value large">${fmtMoney(total)}</div>
+      <div class="card-sub">dari $${PRO_LIMITS.includedCredit} included · sisa ${fmtMoney(remaining)}</div>
+      <div class="bar"><div class="bar-fill ${cls}" style="width:${Math.min(creditUsed, 100)}%"></div></div>
+      <div class="card-sub pct ${cls}" style="margin-top:6px">${creditUsed.toFixed(1)}% used</div>
+    </div>
+  </div></section>`;
+}
+
+function renderBillingBreakdown(billing) {
+  const by = aggregateBillingByCategory(billing.charges);
+  const rows = Object.entries(by)
+    .filter(([_, d]) => d.cost > 0 || d.qty > 0)
+    .sort((a, b) => b[1].cost - a[1].cost)
+    .map(([cat, d]) => {
+      const cls = d.cost > 5 ? 'red' : d.cost > 1 ? 'orange' : d.cost > 0.5 ? 'yellow' : 'green';
+      return `<tr><td>${cat}</td><td>${d.qty.toLocaleString('id-ID', {maximumFractionDigits: 2})} ${d.unit}</td><td class="pct ${cls}">${fmtMoney(d.cost)}</td></tr>`;
+    }).join('');
+  if (!rows) return '<section><h2>📊 Breakdown Biaya</h2><div class="empty">Tidak ada charge dalam 30 hari terakhir.</div></section>';
+  return `<section><h2>📊 Breakdown Biaya per Kategori (30 hari)</h2>
+    <table><thead><tr><th>Kategori</th><th>Pemakaian</th><th>Biaya</th></tr></thead>
+    <tbody>${rows}</tbody></table></section>`;
+}
+
 function renderSummary({ requests, builds }) {
   const r = aggregateRequests(requests) || {};
   const b = aggregateBuilds(builds) || {};
   const totalReq = (r.request_hit_count || 0) + (r.request_miss_count || 0);
 
   const cards = [
-    {
-      label: 'Bandwidth Out',
-      used: r.bandwidth_outgoing_bytes,
-      total: HOBBY_LIMITS.bandwidth,
-      fmt: fmtBytes,
-      totalFmt: fmtBytes(HOBBY_LIMITS.bandwidth),
-    },
-    {
-      label: 'Bandwidth In',
-      used: r.bandwidth_incoming_bytes,
-      total: HOBBY_LIMITS.bandwidth,
-      fmt: fmtBytes,
-      totalFmt: fmtBytes(HOBBY_LIMITS.bandwidth),
-    },
-    {
-      label: 'Function Invocations',
-      used: r.function_invocation_successful_count,
-      total: 1000000,
-      fmt: fmtNum,
-      totalFmt: '1M',
-    },
-    {
-      label: 'Function Errors',
-      used: r.function_invocation_error_count,
-      total: 1000,
-      fmt: fmtNum,
-      totalFmt: '< 1k',
-    },
-    {
-      label: 'Function Duration',
-      used: r.function_execution_successful_gb_hours,
-      total: HOBBY_LIMITS.functionExecution,
-      fmt: v => v.toFixed(2) + ' GB-hrs',
-      totalFmt: HOBBY_LIMITS.functionExecution + ' GB-hrs',
-    },
-    {
-      label: 'Total Requests',
-      used: totalReq,
-      total: null,
-      fmt: fmtNum,
-      totalFmt: 'unlimited (hitung)',
-    },
-    {
-      label: 'Builds Completed',
-      used: b.completed,
-      total: HOBBY_LIMITS.builds,
-      fmt: fmtNum,
-      totalFmt: fmtNum(HOBBY_LIMITS.builds) + ' / hari',
-    },
-    {
-      label: 'Builds Failed',
-      used: b.failed,
-      total: null,
-      fmt: fmtNum,
-      totalFmt: '(dari completed)',
-    },
-    {
-      label: 'Build Time',
-      used: b.seconds / 60,
-      total: null,
-      fmt: v => v.toFixed(1) + ' min',
-      totalFmt: '30 hari',
-    },
+    { label: 'Bandwidth Out', used: r.bandwidth_outgoing_bytes, total: PRO_LIMITS.bandwidth, fmt: fmtBytes, totalFmt: '1 TB included' },
+    { label: 'Bandwidth In', used: r.bandwidth_incoming_bytes, total: null, fmt: fmtBytes, totalFmt: 'Fast Origin Transfer' },
+    { label: 'Edge Requests', used: totalReq, total: PRO_LIMITS.edgeRequests, fmt: fmtNum, totalFmt: '10M included' },
+    { label: 'Function Invocations', used: r.function_invocation_successful_count, total: null, fmt: fmtNum, totalFmt: '$0.60/1M' },
+    { label: 'Function Errors', used: r.function_invocation_error_count, total: null, fmt: fmtNum, totalFmt: 'pay-as-you-go' },
+    { label: 'Function Duration', used: r.function_execution_successful_gb_hours, total: null, fmt: v => v.toFixed(2) + ' GB-hrs', totalFmt: 'Active CPU $0.128/hr' },
+    { label: 'Cache Hits', used: r.request_hit_count, total: null, fmt: fmtNum, totalFmt: 'free' },
+    { label: 'Cache Misses', used: r.request_miss_count, total: null, fmt: fmtNum, totalFmt: 'real invocations' },
+    { label: 'Builds Completed', used: b.completed, total: PRO_LIMITS.buildsPerDay, fmt: fmtNum, totalFmt: '6000/hari' },
+    { label: 'Builds Failed', used: b.failed, total: null, fmt: fmtNum, totalFmt: `${((b.failed / Math.max(b.completed, 1)) * 100).toFixed(1)}% fail rate` },
+    { label: 'Total Build Time', used: b.seconds / 60, total: null, fmt: v => v.toFixed(1) + ' min', totalFmt: 'max 45 min/deploy' },
   ];
 
-  return `<section><h2>📊 Ringkasan Akun (30 hari)</h2><div class="summary">${cards.map(c => {
+  return `<section><h2>📊 Pemakaian 30 Hari</h2><div class="summary">${cards.map(c => {
     const p = c.total ? pct(c.used || 0, c.total) : 0;
     const cls = pctClass(p);
     return `<div class="card">
       <div class="card-label">${c.label}</div>
       <div class="card-value">${c.fmt(c.used || 0)}</div>
-      <div class="card-sub">${c.total ? 'limit ' + c.totalFmt : c.totalFmt}</div>
+      <div class="card-sub">${c.totalFmt}</div>
       ${c.total ? `<div class="bar"><div class="bar-fill ${cls}" style="width:${p}%"></div></div>
       <div class="card-sub pct ${cls}" style="margin-top:6px">${p.toFixed(1)}%</div>` : ''}
     </div>`;
   }).join('')}</div></section>`;
 }
 
-function renderAlerts({ requests }) {
+function renderAlerts({ requests, billing }) {
+  const alerts = [];
   const r = aggregateRequests(requests) || {};
-  const b = aggregateRequests(requests);
-  const checks = [
-    { name: 'Bandwidth Out', used: r.bandwidth_outgoing_bytes, total: HOBBY_LIMITS.bandwidth, fmt: fmtBytes },
-    { name: 'Function Duration', used: r.function_execution_successful_gb_hours, total: HOBBY_LIMITS.functionExecution, fmt: v => v.toFixed(2)+' GB-hrs' },
-    { name: 'Function Invocations', used: r.function_invocation_successful_count, total: 1000000, fmt: fmtNum },
-  ];
-  const alerts = checks.map(c => {
-    const p = pct(c.used || 0, c.total);
-    if (p < 70) return null;
-    const level = p >= 95 ? '🚨 KRITIS' : p >= 85 ? '⚠️ TINGGI' : '⏰ WASPADA';
-    const cls = p >= 95 ? 'crit' : p >= 85 ? '' : 'warn';
-    return { level, name: c.name, p, cls, used: c.fmt(c.used || 0), total: c.fmt(c.total) };
-  }).filter(Boolean);
 
-  if (!alerts.length) return '<section><h2>⚡ Alerts</h2><div class="empty">✅ Semua resource di bawah 70%. Aman.</div></section>';
+  const creditPct = (billing.total || 0) / PRO_LIMITS.includedCredit * 100;
+  if (creditPct >= 70) {
+    const lvl = creditPct >= 95 ? '🚨 KRITIS' : creditPct >= 85 ? '⚠️ TINGGI' : '⏰ WASPADA';
+    const cls = creditPct >= 95 ? 'crit' : creditPct >= 85 ? '' : 'warn';
+    alerts.push({ lvl, cls, txt: `Credit $${PRO_LIMITS.includedCredit}/bln sudah ${creditPct.toFixed(0)}% terpakai (${fmtMoney(billing.total)}). Akan kena on-demand billing setelah credit habis.` });
+  }
+
+  const bwPct = pct(r.bandwidth_outgoing_bytes || 0, PRO_LIMITS.bandwidth);
+  if (bwPct >= 70) {
+    const lvl = bwPct >= 95 ? '🚨 KRITIS' : '⚠️ TINGGI';
+    alerts.push({ lvl, cls: bwPct >= 95 ? 'crit' : '', txt: `Bandwidth mendekati 1 TB included (${bwPct.toFixed(0)}% = ${fmtBytes(r.bandwidth_outgoing_bytes)}).` });
+  }
+
+  if ((r.function_invocation_error_count || 0) > 1000) {
+    alerts.push({ lvl: '🐛 BUG', cls: 'warn', txt: `${fmtNum(r.function_invocation_error_count)} function errors dalam 30 hari. Cek log.` });
+  }
+
+  if (!alerts.length) {
+    alerts.push({ lvl: '✅ INFO', cls: 'info', txt: `Semua aman. Credit terpakai ${creditPct.toFixed(0)}%, bandwidth ${bwPct.toFixed(0)}%.` });
+  }
+
   return `<section><h2>⚡ Alerts (${alerts.length})</h2>${alerts.map(a => `
-    <div class="alert ${a.cls}"><span class="level">${a.level}</span> <b>${a.name}</b> sudah ${a.p.toFixed(1)}% (${a.used} dari ${a.total})</div>
+    <div class="alert ${a.cls}"><span class="level">${a.lvl}</span> ${a.txt}</div>
   `).join('')}</section>`;
 }
 
@@ -335,7 +358,6 @@ async function renderProjects(projects, requests) {
   if (!projects.length) return '<section><h2>📦 Projects</h2><div class="empty">Tidak ada project.</div></section>';
 
   const totalBw = requests?.data?.reduce((s, d) => s + (d.bandwidth_outgoing_bytes || 0), 0) || 0;
-  const breakdown = requests?.data?.[requests.data.length - 1]?.breakdown;
 
   const rows = await Promise.all(projects.map(async p => {
     let detail = { deploys: [], reqData: null };
@@ -348,7 +370,8 @@ async function renderProjects(projects, requests) {
     if (detail.reqData?.data) {
       const projBw = detail.reqData.data.reduce((s, d) => s + (d.bandwidth_outgoing_bytes || 0), 0);
       const pctBw = totalBw ? (projBw / totalBw) * 100 : 0;
-      usageStr = `<span class="pct ${pctClass(pctBw)}">${pctBw.toFixed(0)}%</span> ${fmtBytes(projBw)}`;
+      const fnCount = detail.reqData.data.reduce((s, d) => s + (d.function_invocation_successful_count || 0), 0);
+      usageStr = `<span class="pct ${pctClass(pctBw)}">${pctBw.toFixed(0)}% bw</span> · ${fmtBytes(projBw)} · ${fmtNum(fnCount)} inv`;
     }
 
     const url = detail.proj?.link?.production || detail.proj?.link?.deployment;
@@ -361,7 +384,7 @@ async function renderProjects(projects, requests) {
   }));
 
   return `<section><h2>📦 Projects (${projects.length})</h2>
-    <table><thead><tr><th>Name</th><th>Last Deploy</th><th>Bandwidth (30d)</th><th>Updated</th></tr></thead>
+    <table><thead><tr><th>Name</th><th>Last Deploy</th><th>Pemakaian (30d)</th><th>Updated</th></tr></thead>
     <tbody>${rows.join('')}</tbody></table></section>`;
 }
 
@@ -386,7 +409,7 @@ async function refresh() {
   try {
     const data = await fetchOverview();
     document.getElementById('root').innerHTML =
-      renderHeader() + renderSummary(data) + renderAlerts(data) + '<div id="projects-area">Memuat projects...</div>';
+      renderHeader(data.team) + renderBillingCard(data.billing) + renderBillingBreakdown(data.billing) + renderSummary(data) + renderAlerts(data) + '<div id="projects-area">Memuat projects...</div>';
     document.getElementById('last-update').textContent = '· ' + new Date().toLocaleTimeString('id-ID');
     bindActions();
     renderProjects(data.projects, data.requests).then(h => { document.getElementById('projects-area').innerHTML = h; });
