@@ -203,6 +203,10 @@ async function apiVercel(path) {
   return res.json();
 }
 
+let PERIOD_START = null;
+let PERIOD_END = null;
+let PERIOD_DAYS = 30;
+
 function periodRange() {
   const now = new Date();
   const from = new Date(now); from.setDate(from.getDate() - 30);
@@ -218,9 +222,16 @@ async function fetchUsage(type, opts = {}) {
 }
 
 async function fetchBilling() {
-  const { from, to } = periodRange();
-  const params = new URLSearchParams({ from: from.split('T')[0], to: to.split('T')[0] });
+  const params = new URLSearchParams();
   if (TEAM_ID) params.set('teamId', TEAM_ID);
+  if (PERIOD_START && PERIOD_END) {
+    params.set('from', new Date(PERIOD_START).toISOString().split('T')[0]);
+    params.set('to', new Date(PERIOD_END).toISOString().split('T')[0]);
+  } else {
+    const { from, to } = periodRange();
+    params.set('from', from.split('T')[0]);
+    params.set('to', to.split('T')[0]);
+  }
   const res = await fetch(`${VERCEL_API}/v1/billing/charges?${params}`, {
     headers: { Authorization: `Bearer ${VERCEL_TOKEN}` }
   });
@@ -240,6 +251,11 @@ async function fetchOverview() {
   ]);
   const planKey = (team?.billing?.plan || 'pro').toLowerCase();
   if (PLAN_LIMITS[planKey]) ACTIVE_PLAN = planKey;
+  if (team?.billing?.period) {
+    PERIOD_START = team.billing.period.start;
+    PERIOD_END = team.billing.period.end;
+    PERIOD_DAYS = Math.max(1, Math.ceil((PERIOD_END - Date.now()) / 86400000));
+  }
   return { team, projects: projects.projects || [], requests, builds, billing, planKey: ACTIVE_PLAN };
 }
 
@@ -297,7 +313,7 @@ function renderHeader(team) {
   return `<header>
     <div>
       <h1>Vercel Monitor — ${team?.name || 'smpabbs'}</h1>
-      <div class="meta">Plan: <b>${planName}${planIter ? ' ' + planIter : ''}</b> · ${remaining != null ? `Reset: ${remaining} hari lagi` : '30 hari terakhir'}</div>
+      <div class="meta">Plan: <b>${planName}${planIter ? ' ' + planIter : ''}</b> · ${remaining != null ? `Reset: ${remaining} hari lagi` : '30 hari terakhir'} · Period: ${PERIOD_DAYS} hari</div>
     </div>
     <div>
       <button class="btn" id="refresh">↻ Refresh</button>
@@ -310,21 +326,22 @@ function renderHeader(team) {
 function renderBillingCard(billing) {
   const total = billing.total || 0;
   const includedCredit = L().includedCredit;
+  const subTitle = `Plan ${L().label} · ${PERIOD_DAYS} hari terakhir`;
   if (includedCredit == null) {
-    return `<section><h2>💳 Billing Credit</h2><div class="summary">
+    return `<section><h2>💳 Billing</h2><div class="summary">
       <div class="card featured">
-        <div class="card-label">Biaya Terpakai (30 hari)</div>
+        <div class="card-label">Biaya Terpakai (${PERIOD_DAYS} hari)</div>
         <div class="card-value large">${fmtMoney(total)}</div>
-        <div class="card-sub">Plan ${L().label} — credit custom, hubungi sales untuk detail</div>
+        <div class="card-sub">${subTitle} — credit custom, hubungi sales untuk detail</div>
       </div>
     </div></section>`;
   }
   if (includedCredit === 0) {
     return `<section><h2>💳 Billing</h2><div class="summary">
       <div class="card featured">
-        <div class="card-label">Biaya Terpakai (30 hari)</div>
+        <div class="card-label">Biaya Terpakai (${PERIOD_DAYS} hari)</div>
         <div class="card-value large">${fmtMoney(total)}</div>
-        <div class="card-sub">Plan ${L().label} — tidak ada credit included. Charge penuh ter-bill.</div>
+        <div class="card-sub">${subTitle} — tidak ada credit included. Charge penuh ter-bill.</div>
       </div>
     </div></section>`;
   }
@@ -333,9 +350,9 @@ function renderBillingCard(billing) {
   const cls = pctClass(creditUsed);
   return `<section><h2>💳 Billing Credit</h2><div class="summary">
     <div class="card featured">
-      <div class="card-label">Credit Terpakai (30 hari)</div>
+      <div class="card-label">Credit Terpakai (${PERIOD_DAYS} hari)</div>
       <div class="card-value large">${fmtMoney(total)}</div>
-      <div class="card-sub">dari $${includedCredit} included · sisa ${fmtMoney(remaining)}</div>
+      <div class="card-sub">dari $${includedCredit} included · sisa ${fmtMoney(remaining)} · ${PERIOD_DAYS} hari periode</div>
       <div class="bar"><div class="bar-fill ${cls}" style="width:${Math.min(creditUsed, 100)}%"></div></div>
       <div class="card-sub pct ${cls}" style="margin-top:6px">${creditUsed.toFixed(1)}% used</div>
     </div>
@@ -351,8 +368,8 @@ function renderBillingBreakdown(billing) {
       const cls = d.cost > 5 ? 'red' : d.cost > 1 ? 'orange' : d.cost > 0.5 ? 'yellow' : 'green';
       return `<tr><td>${cat}</td><td>${d.qty.toLocaleString('id-ID', {maximumFractionDigits: 2})} ${d.unit}</td><td class="pct ${cls}">${fmtMoney(d.cost)}</td></tr>`;
     }).join('');
-  if (!rows) return '<section><h2>📊 Breakdown Biaya</h2><div class="empty">Tidak ada charge dalam 30 hari terakhir.</div></section>';
-  return `<section><h2>📊 Breakdown Biaya per Kategori (30 hari)</h2>
+  if (!rows) return `<section><h2>📊 Breakdown Biaya</h2><div class="empty">Tidak ada charge dalam ${PERIOD_DAYS} hari terakhir.</div></section>`;
+  return `<section><h2>📊 Breakdown Biaya per Kategori (${PERIOD_DAYS} hari)</h2>
     <table><thead><tr><th>Kategori</th><th>Pemakaian</th><th>Biaya</th></tr></thead>
     <tbody>${rows}</tbody></table></section>`;
 }
@@ -363,20 +380,20 @@ function renderSummary({ requests, builds }) {
   const totalReq = (r.request_hit_count || 0) + (r.request_miss_count || 0);
 
   const cards = [
-    { label: 'Bandwidth Out', used: r.bandwidth_outgoing_bytes, total: L().bandwidth, fmt: fmtBytes, totalFmt: L().bandwidthLabel },
-    { label: 'Bandwidth In', used: r.bandwidth_incoming_bytes, total: null, fmt: fmtBytes, totalFmt: 'Fast Origin Transfer' },
+    { label: 'Bandwidth Out (Fast Data)', used: r.bandwidth_outgoing_bytes, total: L().bandwidth, fmt: fmtBytes, totalFmt: L().bandwidthLabel },
+    { label: 'Bandwidth In (Origin)', used: r.bandwidth_incoming_bytes, total: null, fmt: fmtBytes, totalFmt: 'Fast Origin Transfer · pay-as-you-go' },
     { label: 'Edge Requests', used: totalReq, total: L().edgeRequests, fmt: fmtNum, totalFmt: L().edgeRequestsLabel },
     { label: 'Function Invocations', used: r.function_invocation_successful_count, total: L().functionInvocations, fmt: fmtNum, totalFmt: L().functionInvocationsLabel },
     { label: 'Function Errors', used: r.function_invocation_error_count, total: null, fmt: fmtNum, totalFmt: 'pay-as-you-go' },
-    { label: 'Function Duration', used: r.function_execution_successful_gb_hours, total: null, fmt: v => v.toFixed(2) + ' GB-hrs', totalFmt: 'Active CPU $0.128/hr' },
+    { label: 'Function Duration (GB-hrs)', used: r.function_execution_successful_gb_hours, total: null, fmt: v => v.toFixed(2) + ' GB-hrs', totalFmt: '$0.128/GB-hr' },
     { label: 'Cache Hits', used: r.request_hit_count, total: null, fmt: fmtNum, totalFmt: 'free' },
     { label: 'Cache Misses', used: r.request_miss_count, total: null, fmt: fmtNum, totalFmt: 'real invocations' },
-    { label: 'Builds Completed', used: b.completed, total: L().buildsPerDay, fmt: fmtNum, totalFmt: L().buildsPerDayLabel },
+    { label: 'Builds Completed', used: b.completed, total: L().buildsPerDay ? L().buildsPerDay * PERIOD_DAYS : null, fmt: fmtNum, totalFmt: `${L().buildsPerDayLabel} × ${PERIOD_DAYS}h = ${L().buildsPerDay ? (L().buildsPerDay * PERIOD_DAYS).toLocaleString('id-ID') : '∞'}` },
     { label: 'Builds Failed', used: b.failed, total: null, fmt: fmtNum, totalFmt: `${((b.failed / Math.max(b.completed, 1)) * 100).toFixed(1)}% fail rate` },
     { label: 'Total Build Time', used: b.seconds / 60, total: null, fmt: v => v.toFixed(1) + ' min', totalFmt: `max ${L().buildMinutesPerDeploy} min/deploy` },
   ];
 
-  return `<section><h2>📊 Pemakaian 30 Hari</h2><div class="summary">${cards.map(c => {
+  return `<section><h2>📊 Pemakaian ${PERIOD_DAYS} Hari</h2><div class="summary">${cards.map(c => {
     const p = c.total ? pct(c.used || 0, c.total) : 0;
     const cls = pctClass(p);
     return `<div class="card">
